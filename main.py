@@ -9,5 +9,5 @@ test_state = {
 
 result = conversation_node(test_state)
 
-print(result)
+
 print(result["messages"][0].content)
