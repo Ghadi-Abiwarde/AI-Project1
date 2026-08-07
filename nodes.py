@@ -1,8 +1,9 @@
 from state import GraphState
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 from llm import create_llm
 from langchain_core.messages import AIMessage
-from database import execute_query
+from database import execute_query, get_database_schema
+from rag.retriever import retrieve_documents
 import json
 
 llm = create_llm()
@@ -67,44 +68,11 @@ def conversation_node(state: GraphState):
 
 def sql_node(state: GraphState):
    latest_message = state["messages"][-1]
-   sql_prompt = """Role:
+   database_schema = get_database_schema()
+   sql_prompt = f"""Role:
                   You are the SQL agent. Convert the user's question into one PostgreSQL SELECT query.
                   Database schema:
-                  customers(
-                  customer_id,
-                  name,
-                  email,
-                  phone_number,
-                  address,
-                  join_date)
-
-                  suppliers(
-                  supplier_id,
-                  supplier_name,
-                  email,
-                  phone_number,
-                  address)
-
-                  products(
-                  product_id,
-                  product_name,
-                  supplier_id,
-                  category,
-                  current_stock,
-                  price)
-
-                  orders(
-                  order_id,
-                  customer_id,
-                  order_date,
-                  total_amount)
-
-                  order_items(
-                  order_item_id,
-                  order_id,
-                  product_id,
-                  quantity,
-                  unit_price)
+                  {database_schema}
 
                   Relationships:
                   products.supplier_id references suppliers.supplier_id.
@@ -117,7 +85,7 @@ def sql_node(state: GraphState):
                   Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, or TRUNCATE.
                   Use only the provided tables and columns.
                   Return valid JSON using exactly this structure:
-                  {"query": "SELECT ..."}
+                  {{"query": "SELECT ..."}}
                   Do not include explanations or Markdown.
                               """
    
@@ -143,22 +111,38 @@ def sql_node(state: GraphState):
     }
    
    try:
-       results = execute_query(query)
+      results = execute_query(query)
+
+      natural_language_prompt = (
+         "Role: You translate database results into natural language. "
+         "Answer the user's question using only the provided database results. "
+         "Do not fabricate data. "
+         "If the results do not contain enough information, say so clearly. "
+         "Do not include Markdown."
+      )
+
+      final_response = llm.invoke([
+         SystemMessage(content=natural_language_prompt),
+         HumanMessage(
+               content=(
+                  f"User question: {latest_message.content}\n"
+                  f"Database results: {results}"
+               )
+         )
+      ])
+
    except Exception as error:
-     return {
-        "messages": [
-            AIMessage(content=f"The database query could not be executed: {error}")
-        ]
-    }   
+      return {
+         "messages": [
+               AIMessage(
+                  content=f"I could not safely execute that database query: {error}"
+               )
+         ]
+      }
 
-     
-  
    return {
-    "messages": [
-        AIMessage(content=str(results))
-    ]
-}
-
+      "messages": [final_response]
+   }
 
 
 
@@ -177,8 +161,43 @@ def visualization_node(state: GraphState):
       response
    ]}
 
+
+
+
+
 def rag_node(state: GraphState):
-   response = AIMessage(content="RAG placeholder")
+   latest_message = state["messages"][-1]
+   documents = retrieve_documents(latest_message.content)
+
+   context = "\n\n".join(
+    document.page_content
+    for document in documents
+)
+   rag_prompt = """Role:
+You are the internal knowledge RAG agent.
+
+Responsibilities:
+Answer questions using only the retrieved internal document context.
+
+Rules:
+Do not use outside knowledge.
+Do not invent missing information.
+If the retrieved context does not contain the answer, clearly say that the information is not available in the internal documents.
+Answer clearly and concisely."""
+
+
+   response = llm.invoke([
+      SystemMessage(content=rag_prompt),
+      HumanMessage(
+         content=f"""
+   Retrieved context:
+   {context}
+
+   User question:
+   {latest_message.content}
+   """
+      )
+   ])
    return {"messages": [
       response
    ]}

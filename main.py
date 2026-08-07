@@ -1,14 +1,29 @@
+from graph import graph
 from langchain_core.messages import HumanMessage
-from nodes import conversation_node
-from nodes import sql_node
 
-test_state = {
-    "messages": [
-        HumanMessage(content="Which customer placed the most orders?")
-    ]
+config = {
+    "configurable": {
+        "thread_id": "test-user-1"
+    }
 }
 
-result = sql_node(test_state)
+test_prompts = [
+    "What does the employee handbook say about annual leave?",
+    "How many remote work days are employees allowed per week?",
+    "Can employees work remotely from another country?",
+    "What health insurance company does Nexora use?"
+]
 
+for prompt in test_prompts:
+    print("\nUSER:", prompt)
 
-#print(result["messages"][0].content)
+    result = graph.invoke(
+        {
+            "messages": [
+                HumanMessage(content=prompt)
+            ]
+        },
+        config=config
+    )
+
+    print("ASSISTANT:", result["messages"][-1].content)

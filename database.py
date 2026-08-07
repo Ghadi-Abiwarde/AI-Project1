@@ -13,11 +13,12 @@ def get_connection():
     port=os.getenv("DB_PORT")
     )
 
+
 def execute_query(query: str, parameters=None):
     connection = get_connection()
+    connection.set_session(readonly=True)
     cursor = connection.cursor()
     
-
     try:
         query = query.strip()
         cursor.execute(query, parameters)
@@ -35,3 +36,22 @@ def execute_query(query: str, parameters=None):
         cursor.close()
         connection.close()
 
+
+def get_database_schema():
+    rows = execute_query("""
+    SELECT
+        table_name,
+        column_name,
+        data_type
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+    ORDER BY table_name, ordinal_position;""")
+
+
+    schema_text =  ""
+
+    for row in rows:
+        schema_text += f'{row["table_name"]}.{row["column_name"]} ({row["data_type"]})\n'
+
+    return schema_text
+    

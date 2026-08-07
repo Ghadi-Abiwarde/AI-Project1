@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .vscode/settings.json
 
+rag/vector_store/index.faiss
+rag/vector_store/index.pkl

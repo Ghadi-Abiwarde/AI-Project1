@@ -5,7 +5,7 @@ from database import execute_query
 
 test_state = {
     "messages": [
-        HumanMessage(content="How many products are in the Accessories category?")
+        HumanMessage(content="What is the most exensive item?")
     ]
 }
 
