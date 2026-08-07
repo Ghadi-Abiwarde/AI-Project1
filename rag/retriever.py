@@ -19,12 +19,3 @@ def retrieve_documents(query: str):
 )
 
     return documents
-
-results = retrieve_documents(
-    "How many annual leave days do employees receive?"
-)
-
-for document in results:
-    print("SOURCE:", document.metadata)
-    print(document.page_content)
-    print("-----")
