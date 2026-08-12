@@ -46,7 +46,14 @@ builder.add_conditional_edges(
 builder.add_edge("conversation_node", END)
 builder.add_edge("sql_node", END)
 builder.add_edge("web_research_node", END)
-builder.add_edge("visualization_node", END)
+def route_after_sql(state: GraphState):
+    if state.get("needs_visualization"):
+        return "visualization_node"
+    return END
+builder.add_conditional_edges(
+    "sql_node",
+    route_after_sql
+)
 builder.add_edge("rag_node", END)
 
 graph = builder.compile(checkpointer=memory)

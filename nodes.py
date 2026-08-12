@@ -4,6 +4,8 @@ from llm import create_llm
 from langchain_core.messages import AIMessage
 from database import execute_query, get_database_schema
 from rag.retriever import retrieve_documents
+from web_search import search_web
+from visualization import create_chart
 import json
 
 llm = create_llm()
@@ -11,15 +13,63 @@ llm = create_llm()
 def supervisor_node(state: GraphState):
  latest_message = state['messages'][-1]
 
- system_prompt = (
-        "Classify the user's request into exactly one category: "
-        "conversation, sql, web_research ,visualization, or rag. "
-        "Return valid JSON using exactly this structure: "
-        '{"next_agent": "category_name"}. '
-        "Do not include explanations or markdown."
-        "Use web_research when the request requires current or external information from the internet."
-        "Use rag when the request refers to internal documents, company policies, handbooks, manuals, uploaded files, or indexed knowledge."
-        )
+ system_prompt = """
+You are the supervisor agent.
+
+Classify the user's request into exactly one category:
+- conversation
+- sql
+- web_research
+- visualization
+- rag
+
+Return valid JSON using exactly this structure:
+{"next_agent": "category_name", "needs_visualization": false}
+
+Routing rules:
+
+1. conversation
+Use conversation for greetings, general knowledge, explanations, writing, and requests that do not require another specialized agent.
+
+2. sql
+Use sql when the request requires retrieving or analyzing data from the PostgreSQL database.
+
+3. web_research
+Use web_research when the request requires current or external information from the internet.
+
+4. rag
+Use rag when the request refers to internal documents, company policies, handbooks, manuals, uploaded files, or indexed knowledge.
+
+5. visualization
+Use visualization when the user provides the data needed to create a chart directly.
+
+Visualization and SQL rules:
+
+If the user provides the chart data directly:
+- next_agent = visualization
+- needs_visualization = false
+
+If the requested visualization requires retrieving data from the PostgreSQL database:
+- next_agent = sql
+- needs_visualization = true
+
+For all other requests:
+- needs_visualization = false
+
+Examples:
+
+User: Create a pie chart from A=40, B=35, C=25.
+Output: {"next_agent": "visualization", "needs_visualization": false}
+
+User: Create a bar chart showing total spending by customer.
+Output: {"next_agent": "sql", "needs_visualization": true}
+
+User: Which customer spent the most money?
+Output: {"next_agent": "sql", "needs_visualization": false}
+
+Do not include explanations or Markdown.
+Return only the JSON object.
+"""
 
  
  response = llm.invoke([
@@ -29,10 +79,12 @@ def supervisor_node(state: GraphState):
 
 
  try:
-  decision = json.loads(response.content)
-  route = decision["next_agent"].strip().lower()
+   decision = json.loads(response.content)
+   route = decision["next_agent"].strip().lower()
+   needs_visualization = decision["needs_visualization"]
  except (json.JSONDecodeError, KeyError, AttributeError):
-  route = "conversation"
+   route = "conversation"
+   needs_visualization = False
 
  allowed_routes = {
     "conversation",
@@ -43,8 +95,11 @@ def supervisor_node(state: GraphState):
  }
  if route not in allowed_routes:
     route = "conversation"
+    needs_visualization = False
 
- return {"next_agent": route}
+ return {"next_agent": route,
+         "needs_visualization": needs_visualization
+         }
 
 
 
@@ -141,7 +196,10 @@ def sql_node(state: GraphState):
       }
 
    return {
-      "messages": [final_response]
+      "messages": [final_response],
+      "agent_results": {
+         "sql": results
+      }
    }
 
 
@@ -149,17 +207,107 @@ def sql_node(state: GraphState):
 
 
 
-def web_research_node(state: GraphState):
-   response = AIMessage(content="web_research placeholder")
-   return {"messages": [
-      response
-   ]}
 
+
+
+
+
+def web_research_node(state: GraphState):
+    latest_message = state["messages"][-1]
+
+    results = search_web(latest_message.content)
+
+    context = ""
+
+    for result in results:
+        context += (
+            f"Title: {result['title']}\n"
+            f"Link: {result['link']}\n"
+            f"Snippet: {result['snippet']}\n\n"
+        )
+
+    web_prompt = """Role:
+You are the web research agent.
+
+Responsibilities:
+Answer the user's question using the provided web search results.
+
+Rules:
+Use only the provided search results.
+Do not fabricate facts.
+If the results are insufficient, say so clearly.
+Mention relevant sources when useful.
+Be concise and clear.
+"""
+
+    response = llm.invoke([
+        SystemMessage(content=web_prompt),
+        HumanMessage(
+            content=f"""
+Search results:
+{context}
+
+User question:
+{latest_message.content}
+"""
+        )
+    ])
+
+    return {
+        "messages": [response]
+    }
+
+   
 def visualization_node(state: GraphState):
-   response = AIMessage(content="Visualization placeholder")
-   return {"messages": [
-      response
-   ]}
+   latest_message = state["messages"][-1]
+   visualization_prompt = f"""Role:
+   You are the Visualization agent. Convert the user's question to charts.
+   Supported chart_type are bar and pie only.
+   Rules:
+   Generate chart type, labels and values.
+   Return valid JSON using exactly this structure:
+   {{"chart_type": "pie",
+   "labels":["A", "B", "C"]
+   "values":[40, 35,25]}}
+   Do not inclide explanations or Markdown.
+"""
+   response = llm.invoke([
+   SystemMessage(content=visualization_prompt),latest_message
+])   
+   try:
+      decision = json.loads(response.content)
+      chart_type = decision["chart_type"].strip().lower()
+      labels = decision["labels"]
+      values = decision["values"]
+   except (json.JSONDecodeError, KeyError, AttributeError):
+      return{
+         "messages":[
+            AIMessage(content="I was unable to generate the chart.")
+         ]
+      }   
+   if chart_type not in {"bar", "pie"}:
+    return {
+        "messages": [
+            AIMessage(content="Unsupported chart type.")
+        ]
+    }
+
+   if len(labels) != len(values):
+    return {
+        "messages": [
+            AIMessage(content="The chart labels and values do not match.")
+        ]
+    }
+   results = create_chart(chart_type, labels, values)
+   return {
+    "messages": [
+        AIMessage(content="Chart created successfully."), response
+    ]
+}
+
+
+  
+   
 
 
 

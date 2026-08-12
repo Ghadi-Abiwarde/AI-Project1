@@ -7,3 +7,5 @@ class GraphState(TypedDict):
     next_agent: NotRequired[str]
     agent_results: NotRequired[dict]
     messages: Annotated[list[BaseMessage], add_messages]
+    needs_visualization: NotRequired[bool]
+
