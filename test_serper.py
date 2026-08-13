@@ -9,9 +9,9 @@ api_key = os.getenv("SERPER_API_KEY")
 results = search_web(
     "latest developments in artificial intelligence"
 )
-
-for result in results:
-    print("TITLE:", result["title"])
-    print("LINK:", result["link"])
-    print("SNIPPET:", result["snippet"])
-    print("-----")
+print(results)
+#for result in results:
+#    print("TITLE:", result["title"])
+#    print("LINK:", result["link"])
+#    print("SNIPPET:", result["snippet"])
+  #  print("-----")

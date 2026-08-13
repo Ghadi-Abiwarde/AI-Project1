@@ -7,23 +7,29 @@ api_key = os.getenv("SERPER_API_KEY")
 
 
 def search_web(query: str):
- headers = {
-    "X-API-KEY": api_key,
-    "Content-Type": "application/json"
-}
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "q": query
+    }
 
- payload = {
-    "q": query
-}
+    try:
+        response = requests.post(
+            "https://google.serper.dev/not-real",
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
 
- response = requests.post(
-     "https://google.serper.dev/search",
-     headers=headers,
-     json=payload
-)
- data = response.json()
+        response.raise_for_status()
 
- results = data["organic"]
- 
- return results[:5]
+        data = response.json()
 
+        results = data.get("organic", [])
+
+        return results[:5]
+
+    except requests.RequestException:
+        return []

@@ -5,7 +5,7 @@ from langchain_core.messages import AIMessage
 from database import execute_query, get_database_schema
 from rag.retriever import retrieve_documents
 from web_search import search_web
-from visualization import create_chart
+from visualization import create_chart, validate_chart_data
 import json
 
 llm = create_llm()
@@ -80,6 +80,7 @@ Return only the JSON object.
 
  try:
    decision = json.loads(response.content)
+
    route = decision["next_agent"].strip().lower()
    needs_visualization = decision["needs_visualization"]
  except (json.JSONDecodeError, KeyError, AttributeError):
@@ -97,9 +98,13 @@ Return only the JSON object.
     route = "conversation"
     needs_visualization = False
 
+ if not isinstance(needs_visualization, bool):
+    needs_visualization = False      
+
  return {"next_agent": route,
          "needs_visualization": needs_visualization
          }
+
 
 
 
@@ -142,6 +147,7 @@ def sql_node(state: GraphState):
                   Return valid JSON using exactly this structure:
                   {{"query": "SELECT ..."}}
                   Do not include explanations or Markdown.
+                  When an aggregate, calculation, ranking, or comparison is used to answer the question, include the calculated value in the SELECT output with a descriptive alias.
                               """
    
 
@@ -167,6 +173,17 @@ def sql_node(state: GraphState):
    
    try:
       results = execute_query(query)
+      if not results:
+         return{
+            "messages": [
+               AIMessage(
+                  content= 'No matching information was found in the database.'
+               )
+            ],
+            "agent_results": {
+               "sql":[]
+            }
+         }
 
       natural_language_prompt = (
          "Role: You translate database results into natural language. "
@@ -187,6 +204,7 @@ def sql_node(state: GraphState):
       ])
 
    except Exception as error:
+      print("SQL execution error:", error)
       return {
          "messages": [
                AIMessage(
@@ -216,6 +234,13 @@ def web_research_node(state: GraphState):
     latest_message = state["messages"][-1]
 
     results = search_web(latest_message.content)
+    if not results:
+       return {
+          "messages":[
+             AIMessage(content="I couldn't retrieve web search results for that request."
+           ) 
+           ]
+            }
 
     context = ""
 
@@ -257,6 +282,15 @@ User question:
         "messages": [response]
     }
 
+
+
+
+
+
+
+
+
+
    
 def visualization_node(state: GraphState):
    latest_message = state["messages"][-1]
@@ -267,9 +301,9 @@ def visualization_node(state: GraphState):
    Generate chart type, labels and values.
    Return valid JSON using exactly this structure:
    {{"chart_type": "pie",
-   "labels":["A", "B", "C"]
+   "labels":["A", "B", "C"],
    "values":[40, 35,25]}}
-   Do not inclide explanations or Markdown.
+   Do not include explanations or Markdown.
 """
    response = llm.invoke([
    SystemMessage(content=visualization_prompt),latest_message
@@ -284,26 +318,47 @@ def visualization_node(state: GraphState):
          "messages":[
             AIMessage(content="I was unable to generate the chart.")
          ]
-      }   
-   if chart_type not in {"bar", "pie"}:
-    return {
-        "messages": [
-            AIMessage(content="Unsupported chart type.")
-        ]
-    }
+      }  
 
-   if len(labels) != len(values):
-    return {
-        "messages": [
-            AIMessage(content="The chart labels and values do not match.")
-        ]
-    }
-   results = create_chart(chart_type, labels, values)
-   return {
-    "messages": [
-        AIMessage(content="Chart created successfully."), response
-    ]
-}
+   validation_error = validate_chart_data(
+    chart_type,
+    labels,
+    values
+)
+   validation_error = validate_chart_data(
+      chart_type,
+      labels,
+      values
+   )
+
+   if validation_error:
+      return {
+         "messages": [
+               AIMessage(content=validation_error)
+         ]
+      }
+
+   
+   try:
+      create_chart(chart_type, labels, values)
+
+   except Exception as error:
+      print("Visualization error:", error)
+
+      return {
+         "messages":[
+            AIMessage(content="The chart could not be created.")
+         ]
+      }
+   return{
+      "messages": [
+         AIMessage(content="Chart created successfully."),
+         response
+      ]
+   }
+
+   
+   
 
 
   
@@ -315,7 +370,28 @@ def visualization_node(state: GraphState):
 
 def rag_node(state: GraphState):
    latest_message = state["messages"][-1]
-   documents = retrieve_documents(latest_message.content)
+   try:
+      documents = retrieve_documents(latest_message.content)
+
+   except Exception as error:
+      print("RAG retrieval error:", error) 
+
+      return {
+         "messages": [
+            AIMessage(
+               content="I couldn't retrieve information from the internal documents."
+            )
+         ]
+      }
+
+   if not documents:
+      return {
+         "messages": [
+            AIMessage(
+               content="I couldn't find relevant information in the internal documents."
+            )
+         ]
+      }
 
    context = "\n\n".join(
     document.page_content

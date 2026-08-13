@@ -11,5 +11,17 @@ def create_chart(chart_type, labels, values):
 
     plt.tight_layout()
     plt.show()        
-   
+
+def validate_chart_data(chart_type, labels, values):
+
+    if chart_type not in {"bar", "pie"}:
+        return "Unsupported chart type."
+
+    if len(labels) != len(values):
+        return "The chart labels and values do not match."
+
+    if not all(isinstance(value, (int, float)) for value in values):
+        return "Chart values must be numeric."
+
+    return None
 
