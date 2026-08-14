@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+from decimal import Decimal
 
 def create_chart(chart_type, labels, values):
     plt.figure(figsize=(8 , 5))
@@ -20,7 +21,7 @@ def validate_chart_data(chart_type, labels, values):
     if len(labels) != len(values):
         return "The chart labels and values do not match."
 
-    if not all(isinstance(value, (int, float)) for value in values):
+    if not all(isinstance(value, (int, float, Decimal)) for value in values):
         return "Chart values must be numeric."
 
     return None

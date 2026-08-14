@@ -39,6 +39,17 @@ Use web_research when the request requires current or external information from 
 
 4. rag
 Use rag when the request refers to internal documents, company policies, handbooks, manuals, uploaded files, or indexed knowledge.
+Use rag for questions about company-specific employee policies, workplace rules,
+leave, probation, remote work, conduct, equipment, HR procedures, or internal company practices,
+even if the user does not explicitly mention "handbook", "policy", or "internal documents".
+
+contrasting exanmples:
+User: What happens if an employee is repeatedly late?
+Output: {"next_agent": "rag", "needs_visualization": false}
+
+User: Why is punctuality important at work?
+Output: {"next_agent": "conversation", "needs_visualization": false}
+
 
 5. visualization
 Use visualization when the user provides the data needed to create a chart directly.
@@ -148,6 +159,7 @@ def sql_node(state: GraphState):
                   {{"query": "SELECT ..."}}
                   Do not include explanations or Markdown.
                   When an aggregate, calculation, ranking, or comparison is used to answer the question, include the calculated value in the SELECT output with a descriptive alias.
+                  When presenting monetary values, format them clearly as currency using a dollar sign and appropriate thousands separators when applicable.
                               """
    
 
@@ -232,9 +244,10 @@ def sql_node(state: GraphState):
 
 def web_research_node(state: GraphState):
     latest_message = state["messages"][-1]
-
-    results = search_web(latest_message.content)
-    if not results:
+    try:
+      results = search_web(latest_message.content)
+    except Exception as error:
+       print("Web search error:", error)
        return {
           "messages":[
              AIMessage(content="I couldn't retrieve web search results for that request."
@@ -262,6 +275,12 @@ Use only the provided search results.
 Do not fabricate facts.
 If the results are insufficient, say so clearly.
 Mention relevant sources when useful.
+Prefer official documentation, primary sources, and authoritative organizations over blogs, videos, forums,or social media when the same information is available from a primary source.
+present the source as the following examples:
+-"According to the official Python 3.14 documentation, major changes include ..."
+-"Sources: Python documentation, Python Developer’s Guide"
+Do not attribute a claim to a source unless that claim is supported by that specific search result.
+When the user asks for the current or latest version of a product, clearly identify the newest stable release first. Distinguish stable releases from beta, preview, or prerelease versions.
 Be concise and clear.
 """
 
@@ -294,9 +313,10 @@ User question:
    
 def visualization_node(state: GraphState):
    latest_message = state["messages"][-1]
+   
    visualization_prompt = f"""Role:
-   You are the Visualization agent. Convert the user's question to charts.
-   Supported chart_type are bar and pie only.
+   You are the Visualization agent.
+   Extract the chart type, labels, and numeric values needed to create a chart from the user's request.
    Rules:
    Generate chart type, labels and values.
    Return valid JSON using exactly this structure:
@@ -308,12 +328,39 @@ def visualization_node(state: GraphState):
    response = llm.invoke([
    SystemMessage(content=visualization_prompt),latest_message
 ])   
-   try:
+   sql_results = state.get("agent_results",{}).get("sql")
+  
+   if sql_results:
+      first_row = sql_results[0]
+      columns = list(first_row.keys())
+
+      if len(columns)<2:
+         return {
+            "messages": [
+               AIMessage(
+                  content = "The database results do not contain enough data to create a chart."
+               )
+            ]
+         }
+      label_column = columns[0]
+      value_column = columns[1]
+      
+      labels = [row[label_column] for row in sql_results]
+      values = [float(row[value_column]) for row in sql_results]
+
+      if "pie" in latest_message.content.lower():
+         chart_type = "pie"
+      else:
+         chart_type = "bar"
+
+
+   else:
+    try:
       decision = json.loads(response.content)
       chart_type = decision["chart_type"].strip().lower()
       labels = decision["labels"]
       values = decision["values"]
-   except (json.JSONDecodeError, KeyError, AttributeError):
+    except (json.JSONDecodeError, KeyError, AttributeError):
       return{
          "messages":[
             AIMessage(content="I was unable to generate the chart.")
@@ -325,11 +372,6 @@ def visualization_node(state: GraphState):
     labels,
     values
 )
-   validation_error = validate_chart_data(
-      chart_type,
-      labels,
-      values
-   )
 
    if validation_error:
       return {
@@ -337,8 +379,8 @@ def visualization_node(state: GraphState):
                AIMessage(content=validation_error)
          ]
       }
-
    
+  
    try:
       create_chart(chart_type, labels, values)
 
@@ -352,8 +394,7 @@ def visualization_node(state: GraphState):
       }
    return{
       "messages": [
-         AIMessage(content="Chart created successfully."),
-         response
+         AIMessage(content="Chart created successfully.")
       ]
    }
 
@@ -388,7 +429,7 @@ def rag_node(state: GraphState):
       return {
          "messages": [
             AIMessage(
-               content="I couldn't find relevant information in the internal documents."
+               content="The information is not available in the internal documents."
             )
          ]
       }
@@ -403,11 +444,15 @@ You are the internal knowledge RAG agent.
 Responsibilities:
 Answer questions using only the retrieved internal document context.
 
-Rules:
-Do not use outside knowledge.
-Do not invent missing information.
-If the retrieved context does not contain the answer, clearly say that the information is not available in the internal documents.
-Answer clearly and concisely."""
+Grounding rules:
+- Answer using only information explicitly stated in the provided context.
+- Do not use general knowledge to fill missing information.
+- Do not infer company rules, procedures, benefits, or policies that are not explicitly stated.
+- If the context only partially answers the question, provide only the supported information and clearly state that the remaining information is not available.
+- If the context does not answer the question, respond exactly:
+  "The information is not available in the internal documents."
+-Answer clearly and concisely.
+"""
 
 
    response = llm.invoke([

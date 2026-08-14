@@ -14,9 +14,14 @@ def retrieve_documents(query: str):
 
 
 
-    documents = vector_store.similarity_search(
-        query,
-        k=3
-    )
+    results = vector_store.similarity_search_with_score(
+    query,
+    k=3
+)
 
-    return documents
+    relevant_documents = [
+    document
+    for document, score in results
+    if score < 1.0
+]   
+    return relevant_documents

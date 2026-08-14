@@ -17,11 +17,12 @@ def search_web(query: str):
 
     try:
         response = requests.post(
-            "https://google.serper.dev/not-real",
+            "https://google.serper.dev/search",
             headers=headers,
             json=payload,
             timeout=10
         )
+        
 
         response.raise_for_status()
 
