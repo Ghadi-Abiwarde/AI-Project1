@@ -6,6 +6,7 @@ from database import execute_query, get_database_schema
 from rag.retriever import retrieve_documents
 from web_search import search_web
 from visualization import create_chart, validate_chart_data
+from decimal import Decimal
 import json
 
 llm = create_llm()
@@ -138,100 +139,170 @@ def conversation_node(state: GraphState):
 
 
 def sql_node(state: GraphState):
-   latest_message = state["messages"][-1]
-   database_schema = get_database_schema()
-   sql_prompt = f"""Role:
-                  You are the SQL agent. Convert the user's question into one PostgreSQL SELECT query.
-                  Database schema:
-                  {database_schema}
+    latest_message = state["messages"][-1]
+    database_schema = get_database_schema()
 
-                  Relationships:
-                  products.supplier_id references suppliers.supplier_id.
-                  orders.customer_id references customers.customer_id.
-                  order_items.order_id references orders.order_id.
-                  order_items.product_id references products.product_id.
+    sql_prompt = f"""Role:
+You are the SQL agent. Convert the user's question into one PostgreSQL SELECT query.
 
-                  Rules:
-                  Generate exactly one PostgreSQL SELECT query.
-                  Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, or TRUNCATE.
-                  Use only the provided tables and columns.
-                  Return valid JSON using exactly this structure:
-                  {{"query": "SELECT ..."}}
-                  Do not include explanations or Markdown.
-                  When an aggregate, calculation, ranking, or comparison is used to answer the question, include the calculated value in the SELECT output with a descriptive alias.
-                  When presenting monetary values, format them clearly as currency using a dollar sign and appropriate thousands separators when applicable.
-                              """
-   
+Database schema:
+{database_schema}
 
-   response = llm.invoke([
-     SystemMessage(content=sql_prompt), latest_message
-   ])
+Relationships:
+products.supplier_id references suppliers.supplier_id.
+orders.customer_id references customers.customer_id.
+order_items.order_id references orders.order_id.
+order_items.product_id references products.product_id.
 
-   try:
-     decision = json.loads(response.content)
-     query = decision["query"].strip()
-   except (json.JSONDecodeError, KeyError, AttributeError):
-      return {
-    "messages": [
-        AIMessage(content="I was unable to generate a valid SQL query.")
-    ]
-}
-   if not query.lower().startswith("select"):
-      return {
-        "messages": [
-            AIMessage(content="Only SELECT queries are allowed.")
-        ]
-    }
-   
-   try:
-      results = execute_query(query)
-      if not results:
-         return{
+Rules:
+Generate exactly one PostgreSQL SELECT query.
+Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, or TRUNCATE.
+Use only the provided tables and columns.
+
+Return valid JSON using exactly this structure:
+{{"query": "SELECT ..."}}
+
+Do not include explanations or Markdown.
+
+When an aggregate, calculation, ranking, or comparison is used to answer the question,
+include the calculated value in the SELECT output with a descriptive alias.
+
+All numeric database values must remain numeric in the SELECT output.
+Do not format numeric values for display inside SQL.
+Do not use TO_CHAR for numeric formatting.
+Do not add currency symbols.
+Do not convert numeric values to text.
+Human-readable formatting will be handled after the query executes.
+"""
+
+    response = llm.invoke([
+        SystemMessage(content=sql_prompt),
+        latest_message
+    ])
+
+    try:
+        decision = json.loads(response.content)
+        query = decision["query"].strip()
+
+    except (json.JSONDecodeError, KeyError, AttributeError):
+        return {
             "messages": [
-               AIMessage(
-                  content= 'No matching information was found in the database.'
-               )
-            ],
-            "agent_results": {
-               "sql":[]
+                AIMessage(
+                    content="I was unable to generate a valid SQL query."
+                )
+            ]
+        }
+
+    # If GPT-OSS formats numeric values using TO_CHAR,
+    # regenerate the query once with stricter instructions.
+    if "to_char(" in query.lower():
+        correction_prompt = f"""
+The following PostgreSQL query incorrectly formats numeric values as text:
+
+{query}
+
+Regenerate the query while following these rules:
+- Keep all numeric database values numeric.
+- Do not use TO_CHAR.
+- Do not add currency symbols.
+- Do not convert numeric values to text.
+- Preserve the meaning of the original query.
+- Return valid JSON using exactly this structure:
+{{"query": "SELECT ..."}}
+- Return no explanations or Markdown.
+"""
+
+        retry_response = llm.invoke([
+            SystemMessage(content=correction_prompt)
+        ])
+
+        try:
+            retry_decision = json.loads(retry_response.content)
+            query = retry_decision["query"].strip()
+
+        except (json.JSONDecodeError, KeyError, AttributeError):
+            return {
+                "messages": [
+                    AIMessage(
+                        content="I was unable to generate a valid database query."
+                    )
+                ]
             }
-         }
 
-      natural_language_prompt = (
-         "Role: You translate database results into natural language. "
-         "Answer the user's question using only the provided database results. "
-         "Do not fabricate data. "
-         "If the results do not contain enough information, say so clearly. "
-         "Do not include Markdown."
-      )
+    # If the retry still contains TO_CHAR, reject it.
+    if "to_char(" in query.lower():
+        return {
+            "messages": [
+                AIMessage(
+                    content="The generated database query contained unsupported numeric formatting."
+                )
+            ]
+        }
 
-      final_response = llm.invoke([
-         SystemMessage(content=natural_language_prompt),
-         HumanMessage(
-               content=(
-                  f"User question: {latest_message.content}\n"
-                  f"Database results: {results}"
-               )
-         )
-      ])
+    # Safety check: SELECT queries only.
+    if not query.lower().startswith("select"):
+        return {
+            "messages": [
+                AIMessage(
+                    content="Only SELECT queries are allowed."
+                )
+            ]
+        }
 
-   except Exception as error:
-      print("SQL execution error:", error)
-      return {
-         "messages": [
-               AIMessage(
-                  content=f"I could not safely execute that database query: {error}"
-               )
-         ]
-      }
+    try:
+        results = execute_query(query)
 
-   return {
-      "messages": [final_response],
-      "agent_results": {
-         "sql": results
-      }
-   }
+        if not results:
+            return {
+                "messages": [
+                    AIMessage(
+                        content="No matching information was found in the database."
+                    )
+                ],
+                "agent_results": {
+                    "sql": []
+                }
+            }
 
+        natural_language_prompt = (
+            "Role: You translate database results into natural language. "
+            "Answer the user's question using only the provided database results. "
+            "Do not fabricate data. "
+            "If the results do not contain enough information, say so clearly. "
+            "When presenting monetary values, format them clearly as currency "
+            "using a dollar sign and appropriate thousands separators when applicable. "
+            "Do not include Markdown."
+        )
+
+        final_response = llm.invoke([
+            SystemMessage(content=natural_language_prompt),
+            HumanMessage(
+                content=(
+                    f"User question: {latest_message.content}\n"
+                    f"Database results: {results}"
+                )
+            )
+        ])
+
+    except Exception as error:
+        print("SQL execution error:", error)
+
+        return {
+            "messages": [
+                AIMessage(
+                    content=f"I could not safely execute that database query: {error}"
+                )
+            ]
+        }
+
+    return {
+        "messages": [
+            final_response
+        ],
+        "agent_results": {
+            "sql": results
+        }
+    }
 
 
 
@@ -263,6 +334,16 @@ def web_research_node(state: GraphState):
             f"Link: {result['link']}\n"
             f"Snippet: {result['snippet']}\n\n"
         )
+        sitelinks = result.get("sitelinks", [])
+
+        for sitelink in sitelinks:
+           context += (
+              f" Sitelink title: {sitelink.get('title', '')}\n"
+              f" Sitelink link: {sitelink.get('link', '')}\n"
+              f" Sitelink snippet: {sitelink.get('snippet', '')}\n"
+           )
+    context += "\n"
+
 
     web_prompt = """Role:
 You are the web research agent.
@@ -282,6 +363,12 @@ present the source as the following examples:
 Do not attribute a claim to a source unless that claim is supported by that specific search result.
 When the user asks for the current or latest version of a product, clearly identify the newest stable release first. Distinguish stable releases from beta, preview, or prerelease versions.
 Be concise and clear.
+For questions asking for the latest, newest, or current version:
+- Use only the provided search results.
+- Prefer official or primary sources.
+- Use sitelinks when they provide clearer version information.
+- Do not rely on prior knowledge.
+- If the search results do not clearly establish the current version, say that the information is insufficient.
 """
 
     response = llm.invoke([
@@ -324,29 +411,63 @@ def visualization_node(state: GraphState):
    "labels":["A", "B", "C"],
    "values":[40, 35,25]}}
    Do not include explanations or Markdown.
+   When generating data that may be used for calculations or visualization,
+   return numeric database values as numeric values.
+   Do not format numeric values as currency strings, percentages, or other display-formatted text in SQL.
+   Do not use TO_CHAR or concatenate currency symbols to numeric values.
+   Formatting for human-readable responses will be handled separately.
 """
    response = llm.invoke([
    SystemMessage(content=visualization_prompt),latest_message
 ])   
    sql_results = state.get("agent_results",{}).get("sql")
+   #print("SQL RESULTS:", sql_results)
+
+
   
    if sql_results:
       first_row = sql_results[0]
       columns = list(first_row.keys())
+      for column, value in first_row.items():
 
-      if len(columns)<2:
-         return {
+
+         if len(columns)<2:
+            return {
             "messages": [
                AIMessage(
                   content = "The database results do not contain enough data to create a chart."
                )
             ]
          }
-      label_column = columns[0]
-      value_column = columns[1]
+      label_column = None
+      value_column = None
       
-      labels = [row[label_column] for row in sql_results]
-      values = [float(row[value_column]) for row in sql_results]
+      for column, value in first_row.items():
+
+         if isinstance(value, str) and label_column is None:
+            label_column = column
+
+         elif isinstance(value, (int, float, Decimal)) and not column.lower().endswith("_id") and value_column is None:
+            value_column = column
+
+      if label_column is None or value_column is None:
+            return {
+               "messages": [
+                     AIMessage(
+                        content="The database results do not contain suitable data for a chart."
+                     )
+               ]
+    }  
+      labels = [
+            row[label_column]
+            for row in sql_results
+         ]
+
+      values = [
+            float(row[value_column])
+            for row in sql_results
+         ]
+
 
       if "pie" in latest_message.content.lower():
          chart_type = "pie"

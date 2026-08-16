@@ -1,8 +1,14 @@
-from rag.retriever import retrieve_documents
+from llm import create_llm
+from web_search import search_web
 
-documents = retrieve_documents(
-    "What happens if an employee is repeatedly late?"
+
+results = search_web(
+    "What changed in the latest Python release?"
 )
 
-print("DOCUMENTS:", documents)
-print("NUMBER:", len(documents))
+for result in results:
+    #print("TITLE:", result.get("title"))
+    #print("LINK:", result.get("link"))
+    #print("SNIPPET:", result.get("snippet"))
+    #print("-----")
+    print(results[0])

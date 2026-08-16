@@ -11,14 +11,10 @@ def retrieve_documents(query: str):
         embeddings,
         allow_dangerous_deserialization=True
     )
-
-
-
     results = vector_store.similarity_search_with_score(
     query,
     k=3
 )
-
     relevant_documents = [
     document
     for document, score in results
