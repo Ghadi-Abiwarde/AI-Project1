@@ -1,7 +1,6 @@
 from state import GraphState
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from llm import create_llm
-from langchain_core.messages import AIMessage
 from database import execute_query, get_database_schema
 from rag.retriever import retrieve_documents
 from web_search import search_web
@@ -44,7 +43,7 @@ Use rag for questions about company-specific employee policies, workplace rules,
 leave, probation, remote work, conduct, equipment, HR procedures, or internal company practices,
 even if the user does not explicitly mention "handbook", "policy", or "internal documents".
 
-contrasting exanmples:
+Contrasting examples:
 User: What happens if an employee is repeatedly late?
 Output: {"next_agent": "rag", "needs_visualization": false}
 
@@ -158,6 +157,15 @@ Rules:
 Generate exactly one PostgreSQL SELECT query.
 Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, or TRUNCATE.
 Use only the provided tables and columns.
+When the question refers to a specific named entity such as a customer, product, or supplier,
+include the identifying field in the query result.
+For aggregate questions about a specific named entity, the query must only return a row if that entity actually exists.
+
+Do not use aggregate patterns that return a default zero row when the named entity does not exist.
+For example, when counting orders for a specific customer:
+- filter by the customer in the customers table
+- group by that customer
+- if the customer does not exist, return no rows
 
 Return valid JSON using exactly this structure:
 {{"query": "SELECT ..."}}
@@ -356,8 +364,8 @@ Use only the provided search results.
 Do not fabricate facts.
 If the results are insufficient, say so clearly.
 Mention relevant sources when useful.
-Prefer official documentation, primary sources, and authoritative organizations over blogs, videos, forums,or social media when the same information is available from a primary source.
-present the source as the following examples:
+Prefer official documentation, primary sources, and authoritative organizations over blogs, videos, forums, or social media when the same information is available from a primary source.
+Present the source as the following examples:
 -"According to the official Python 3.14 documentation, major changes include ..."
 -"Sources: Python documentation, Python Developer’s Guide"
 Do not attribute a claim to a source unless that claim is supported by that specific search result.
@@ -411,28 +419,22 @@ def visualization_node(state: GraphState):
    "labels":["A", "B", "C"],
    "values":[40, 35,25]}}
    Do not include explanations or Markdown.
-   When generating data that may be used for calculations or visualization,
-   return numeric database values as numeric values.
-   Do not format numeric values as currency strings, percentages, or other display-formatted text in SQL.
-   Do not use TO_CHAR or concatenate currency symbols to numeric values.
-   Formatting for human-readable responses will be handled separately.
 """
    response = llm.invoke([
    SystemMessage(content=visualization_prompt),latest_message
 ])   
    sql_results = state.get("agent_results",{}).get("sql")
-   #print("SQL RESULTS:", sql_results)
+   
 
 
   
    if sql_results:
       first_row = sql_results[0]
       columns = list(first_row.keys())
-      for column, value in first_row.items():
 
 
-         if len(columns)<2:
-            return {
+      if len(columns)<2:
+                return {
             "messages": [
                AIMessage(
                   content = "The database results do not contain enough data to create a chart."
@@ -572,7 +574,7 @@ Grounding rules:
 - If the context only partially answers the question, provide only the supported information and clearly state that the remaining information is not available.
 - If the context does not answer the question, respond exactly:
   "The information is not available in the internal documents."
--Answer clearly and concisely.
+- Answer clearly and concisely.
 """
 
 

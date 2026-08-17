@@ -5,3 +5,10 @@ __pycache__/
 
 rag/vector_store/index.faiss
 rag/vector_store/index.pkl
+evaluate_routing.py
+test_database.py
+test_integration.py
+test_serper.py
+test_supervisor.py
+test_visualization.py
+testing.py

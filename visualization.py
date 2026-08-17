@@ -18,6 +18,9 @@ def validate_chart_data(chart_type, labels, values):
     if chart_type not in {"bar", "pie"}:
         return "Unsupported chart type."
 
+    if not labels or not values:
+        return "No data is available to create the chart."
+
     if len(labels) != len(values):
         return "The chart labels and values do not match."
 
