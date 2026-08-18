@@ -12,3 +12,4 @@ test_serper.py
 test_supervisor.py
 test_visualization.py
 testing.py
+.chainlit/translations/

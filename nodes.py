@@ -8,6 +8,7 @@ from visualization import create_chart, validate_chart_data
 from decimal import Decimal
 import json
 
+
 llm = create_llm()
 
 def supervisor_node(state: GraphState):
@@ -505,7 +506,8 @@ def visualization_node(state: GraphState):
    
   
    try:
-      create_chart(chart_type, labels, values)
+      figure = create_chart(chart_type, labels, values)
+
 
    except Exception as error:
       print("Visualization error:", error)
@@ -518,7 +520,15 @@ def visualization_node(state: GraphState):
    return{
       "messages": [
          AIMessage(content="Chart created successfully.")
-      ]
+      ],
+      "agent_results": {
+         **state.get("agent_results", {}),
+         "chart": {
+            "chart_type": chart_type,
+            "labels": labels,
+            "values": values
+         }
+      }
    }
 
    
