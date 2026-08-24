@@ -30,7 +30,7 @@ def search_web(query: str):
 
         results = data.get("organic", [])
 
-        return results[:5]
+        return results[:10]
 
     except requests.RequestException:
         return []

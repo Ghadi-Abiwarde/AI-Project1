@@ -1,4 +1,4 @@
-from state import GraphState
+from state import GraphState, WebResearchState
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from llm import create_llm
 from database import execute_query, get_database_schema
@@ -7,6 +7,9 @@ from web_search import search_web
 from visualization import create_chart, validate_chart_data
 from decimal import Decimal
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 llm = create_llm()
@@ -315,76 +318,228 @@ Regenerate the query while following these rules:
 
 
 
-
-
-
-
-
-
-
-def web_research_node(state: GraphState):
+def researcher_node(state: WebResearchState):
     latest_message = state["messages"][-1]
-    try:
-      results = search_web(latest_message.content)
-    except Exception as error:
-       print("Web search error:", error)
-       return {
-          "messages":[
-             AIMessage(content="I couldn't retrieve web search results for that request."
-           ) 
-           ]
-            }
 
+    # Step 1: Generate targeted search queries
+    query_prompt = """Role:
+You are a web research agent.
+
+Your task is to generate targeted search queries that will help answer the user's question.
+
+Rules:
+- Generate 2 to 3 concise search queries.
+- Each query should target a different useful angle of the question.
+- Prefer precise technical terms when appropriate.
+- Do not answer the user's question.
+- Return valid JSON using exactly this structure:
+{"queries": ["query 1", "query 2", "query 3"]}
+- Do not include explanations or Markdown.
+"""
+
+    query_response = llm.invoke([
+        SystemMessage(content=query_prompt),
+        HumanMessage(content=latest_message.content)
+    ])
+
+    try:
+        query_decision = json.loads(query_response.content)
+        queries = query_decision["queries"]
+
+        if not isinstance(queries, list) or not queries:
+            queries = [latest_message.content]
+
+    except (json.JSONDecodeError, KeyError, TypeError):
+        queries = [latest_message.content]
+
+    # Step 2: Search the web using all generated queries
+    all_results = []
+
+    for query in queries:
+        results = search_web(query)
+        all_results.extend(results)
+
+    # Step 3: Remove duplicate results
+    unique_results = []
+    seen_links = set()
+
+    for result in all_results:
+        link = result.get("link", "")
+
+        if link and link not in seen_links:
+            seen_links.add(link)
+            unique_results.append(result)
+
+    print("GENERATED QUERIES:", queries)
+    print("TOTAL RESULTS:", len(all_results))
+    print("UNIQUE RESULTS:", len(unique_results))
+
+    # Step 4: Build the raw research context
     context = ""
 
-    for result in results:
+    for result in unique_results:
         context += (
-            f"Title: {result['title']}\n"
-            f"Link: {result['link']}\n"
-            f"Snippet: {result['snippet']}\n\n"
+            f"Title: {result.get('title', '')}\n"
+            f"Link: {result.get('link', '')}\n"
+            f"Snippet: {result.get('snippet', '')}\n"
         )
+
         sitelinks = result.get("sitelinks", [])
 
         for sitelink in sitelinks:
-           context += (
-              f" Sitelink title: {sitelink.get('title', '')}\n"
-              f" Sitelink link: {sitelink.get('link', '')}\n"
-              f" Sitelink snippet: {sitelink.get('snippet', '')}\n"
-           )
-    context += "\n"
+            context += (
+                f" Sitelink title: {sitelink.get('title', '')}\n"
+                f" Sitelink link: {sitelink.get('link', '')}\n"
+                f" Sitelink snippet: {sitelink.get('snippet', '')}\n"
+            )
 
+        context += "\n"
 
-    web_prompt = """Role:
-You are the web research agent.
+    # If Serper found nothing useful, stop here
+    if not context.strip():
+        return {
+            "research_context": "",
+            "research_error": "No useful web search results were found for that request."
+        }
 
-Responsibilities:
-Answer the user's question using the provided web search results.
+    # Step 5: Let the researcher select the useful evidence
+    selection_prompt = """Role:
+You are the evidence selector for a web research agent.
+
+Your task is to select the search results that are most useful for answering the user's question.
 
 Rules:
-Use only the provided search results.
-Do not fabricate facts.
-If the results are insufficient, say so clearly.
-Mention relevant sources when useful.
-Prefer official documentation, primary sources, and authoritative organizations over blogs, videos, forums, or social media when the same information is available from a primary source.
-Present the source as the following examples:
--"According to the official Python 3.14 documentation, major changes include ..."
--"Sources: Python documentation, Python Developer’s Guide"
-Do not attribute a claim to a source unless that claim is supported by that specific search result.
-When the user asks for the current or latest version of a product, clearly identify the newest stable release first. Distinguish stable releases from beta, preview, or prerelease versions.
-Be concise and clear.
-For questions asking for the latest, newest, or current version:
-- Use only the provided search results.
-- Prefer official or primary sources.
-- Use sitelinks when they provide clearer version information.
-- Do not rely on prior knowledge.
-- If the search results do not clearly establish the current version, say that the information is insufficient.
+- Select only results that meaningfully help answer the user's question.
+- Prefer official, primary, authoritative, or specialist sources when available.
+- For niche topics, relevant community sources may be selected when stronger sources are unavailable.
+- Do not reject useful evidence solely because it comes from a secondary or community source.
+- Remove irrelevant, redundant, or low-information results.
+- For comparison questions, retain enough evidence to support each side of the comparison.
+- Do not discard a result if it provides a direct definition of one of the concepts being compared.
+- Prefer explicit definitions over vague or truncated snippets.
+- When multiple sources provide complementary evidence, keep them even if they are about the same topic.
+- Do not reduce the evidence set so aggressively that an important concept is supported only by an ambiguous snippet.
+- Aim to retain roughly 3 to 6 strong, complementary results when available.
+
+CRITICAL RULES:
+- Copy selected evidence exactly from the provided search results.
+- Preserve the original title, link, and snippet.
+- Do not rewrite, expand, summarize, interpret, complete, or improve snippets.
+- Do not infer information that is not explicitly present.
+- Do not combine multiple snippets into a new claim.
+- Do not answer the user's question.
+- Do not write conclusions or explanations.
+- Do not add facts from prior knowledge.
+
+Return only selected results using this format:
+
+Title: ...
+Link: ...
+Snippet: ...
+
+Title: ...
+Link: ...
+Snippet: ...
 """
 
+    selection_response = llm.invoke([
+        SystemMessage(content=selection_prompt),
+        HumanMessage(
+            content=f"""User question:
+{latest_message.content}
+
+Search results:
+{context}
+"""
+        )
+    ])
+
+    selected_context = selection_response.content
+
+    if not selected_context.strip():
+      return {
+         "research_context": "",
+         "research_error": "No sufficiently relevant web search was found for that request."
+      }
+
+    # Temporary debugging
+    print("\n========== SELECTED RESEARCH ==========")
+    print(selected_context)
+    print("=======================================\n")
+
+    # Step 6: Pass selected evidence to the supervisor
+    return {
+        "research_context": selected_context,
+        "research_error": ""
+    }
+   
+
+      
+       
+
+def report_writer_node(state: WebResearchState):
+    latest_message = state["messages"][-1]
+    context = state.get("research_context", "")
+
+    
+
+    report_prompt = """Role:
+You are the Report Writer for the web research team.
+
+Responsibilities:
+Answer the user's question by synthesizing the provided web research results.
+Produce the most useful and complete answer that the available evidence supports.
+Your job is synthesis, not speculation.
+
+Grounding Rules:
+- Use only the provided research results.
+- Do not use prior knowledge to fill gaps.
+- Do not fabricate facts, calculations, examples, formulas, mechanics, sources, tools, or capabilities.
+- Do not infer the meaning of an unfamiliar technical term, statistic, mechanic, or feature from its name.
+- If the research does not support a specific claim, do not make that claim.
+- If the available evidence is insufficient to establish part of the answer, say so clearly.
+- Do not expand a brief source snippet into a more detailed technical explanation unless that explanation is explicitly supported by the provided research.
+- Do not convert a broad statement into a more specific mechanic than the evidence supports.
+
+Source Handling:
+- Prefer official documentation, primary sources, and authoritative organizations when available.
+- When authoritative sources are unavailable, relevant specialist websites, community research, forums, and other secondary sources may be used.
+- Clearly qualify information that is uncertain, disputed, or based primarily on community research.
+- Do not attribute a claim to a source unless that source actually supports it.
+
+Technical Information:
+- Preserve important terminology, definitions, formulas, calculations, measurements, and distinctions found in the research.
+- Do not replace specific technical information with generic interpretations or advice.
+- For technical or niche topics, prioritize concrete documented or measured behavior over speculation.
+- Do not invent recommendations or conclusions that are not supported by the research.
+- When evidence is limited to short search snippets, preserve the level of certainty and detail of those snippets instead of elaborating beyond them.
+- Do not infer the exact order of operations in a formula unless the research explicitly states it.
+- If the research establishes that one value is additive and another is multiplicative, state only that distinction unless the calculation order is directly supported.
+- Do not infer how modifiers interact with other modifiers unless the research explicitly describes that interaction.
+
+Current Information:
+When the user asks for the latest, newest, or current information:
+- Prefer official or primary sources when available.
+- For software versions, clearly distinguish stable releases from beta, preview, or prerelease versions.
+- Do not rely on prior knowledge for current information.
+
+Response Style:
+- Answer the user's actual question directly.
+- Be clear, accurate, and appropriately detailed.
+- Mention relevant sources when useful.
+- Never mention other agents, specialists, assistants, teams, or handoffs in the final answer.
+- Never suggest transferring, redirecting, or handing the user to another agent or specialist.
+- Do not end the response by offering additional services, further research, specialist help, or follow-up assistance.
+- End the response naturally after answering the user's question.
+"""
+
+    
+
     response = llm.invoke([
-        SystemMessage(content=web_prompt),
+        SystemMessage(content=report_prompt),
         HumanMessage(
             content=f"""
-Search results:
+Research results:
 {context}
 
 User question:
@@ -396,6 +551,84 @@ User question:
     return {
         "messages": [response]
     }
+
+
+def web_research_supervisor_node(state: WebResearchState):
+
+   research_context = state.get("research_context", "")
+   research_error = state.get("research_error", "")
+
+   if not research_context and not research_error:
+      return {
+         "web_next_step": "researcher"
+      }
+
+   if research_error:
+      return {
+         "web_next_step": "fallback"
+      }
+
+   latest_message = state ["messages"][-1]
+
+   supervisor_prompt = """Role:
+You are the Web Research Supervisor.
+
+Responsibilities:
+Evaluate the collected research and decide whether it provides enough relevant evidence to answer the user's question.
+
+Possible Decisions:
+- report_writer
+- fallback
+
+Decision Rules:
+- Choose "report_writer" when the research contains enough relevant evidence to provide a useful answer, even if the answer must be qualified or incomplete.
+- A direct definition, comparison, relationship, measured behavior, or supported distinction between the concepts in the user's question is sufficient for "report_writer".
+- Do not require complete formulas, exhaustive documentation, or authoritative confirmation when the available evidence still supports a meaningful answer.
+- Choose "fallback" when the research is empty, unrelated, clearly unreliable, contradictory without enough evidence to resolve the question, or genuinely insufficient to provide a useful answer.
+- Do not require every detail of the user's question to be answered perfectly. Choose "report_writer" when a useful, appropriately qualified answer can be produced from the available evidence.
+- Source quality alone is not a reason to reject otherwise relevant research.
+- Prefer official, primary, and authoritative sources when available.
+- When authoritative sources are unavailable, relevant specialist websites, community research, forums, and other secondary sources may still provide sufficient evidence.
+- Do not require official documentation for every topic.
+- Do not answer the user's question yourself. Your only task is to select the next step.
+
+Output:
+Return valid JSON using exactly this structure:
+{"next_step": "report_writer"}
+
+The value of "next_step" must be either "report_writer" or "fallback".
+Do not include explanations, Markdown, or any other text.
+"""
+
+   response = llm.invoke([
+      SystemMessage(content=supervisor_prompt),
+      HumanMessage(
+         content=f"""
+User question:
+{latest_message.content}
+
+Research results:
+{research_context}
+"""
+      )
+   ])
+
+   try:
+      decision = json.loads(response.content)
+
+      next_step = decision["next_step"].strip().lower()
+
+      if next_step not in {"report_writer", "fallback"}:
+         next_step = "fallback"
+
+   except (json.JSONDecodeError, KeyError, AttributeError):
+      next_step = "fallback"
+
+   return {
+      "web_next_step": next_step
+   }         
+
+
 
 
 
@@ -413,12 +646,19 @@ def visualization_node(state: GraphState):
    visualization_prompt = f"""Role:
    You are the Visualization agent.
    Extract the chart type, labels, and numeric values needed to create a chart from the user's request.
+   
+   Supported chart types:
+   - bar
+   - pie
+   - line
+   
    Rules:
    Generate chart type, labels and values.
    Return valid JSON using exactly this structure:
    {{"chart_type": "pie",
    "labels":["A", "B", "C"],
    "values":[40, 35,25]}}
+
    Do not include explanations or Markdown.
 """
    response = llm.invoke([
@@ -471,12 +711,14 @@ def visualization_node(state: GraphState):
             for row in sql_results
          ]
 
+      request_text = latest_message.content.lower()
 
-      if "pie" in latest_message.content.lower():
+      if "pie" in request_text:
          chart_type = "pie"
+      elif "line" in request_text:
+         chart_type = "line"
       else:
-         chart_type = "bar"
-
+         chart_type = "bar" 
 
    else:
     try:
@@ -506,7 +748,7 @@ def visualization_node(state: GraphState):
    
   
    try:
-      figure = create_chart(chart_type, labels, values)
+      create_chart(chart_type, labels, values)
 
 
    except Exception as error:

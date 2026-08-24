@@ -55,19 +55,13 @@ async def main(message: cl.Message):
     chart = result.get("agent_results", {}).get("chart")
 
     if chart:
-        chart_type = chart["chart_type"]
-        labels = chart["labels"]
-        values = chart["values"]
-
-        fig = create_chart(
-            chart_type,
-            labels,
-            values
-        )
-
-        element = cl.Pyplot(
-            name="chart",
-            figure=fig,
+        element = cl.CustomElement(
+            name="InteractiveChart",
+            props={
+                "chart_type": chart["chart_type"],
+                "labels": chart["labels"],
+                "values": chart["values"]
+            },
             display="inline"
         )
 
@@ -76,10 +70,7 @@ async def main(message: cl.Message):
             elements=[element]
         ).send()
 
-        plt.close(fig)
-
     else:
         await cl.Message(
             content=response
         ).send()
-     

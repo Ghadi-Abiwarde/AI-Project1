@@ -1,11 +1,11 @@
 from langgraph.graph import StateGraph, START, END
 from state import GraphState
 from typing import Literal
+from web_team import web_team_graph
 from nodes import(
     supervisor_node,
     conversation_node,
     sql_node,
-    web_research_node,
     visualization_node,
     rag_node
 )
@@ -18,7 +18,7 @@ builder = StateGraph(GraphState)
 builder.add_node("supervisor_node", supervisor_node)                       
 builder.add_node("conversation_node", conversation_node)
 builder.add_node("sql_node", sql_node)
-builder.add_node("web_research_node", web_research_node)
+builder.add_node("web_research_node", web_team_graph)
 builder.add_node("visualization_node", visualization_node)
 builder.add_node("rag_node", rag_node)
 

@@ -10,3 +10,8 @@ class GraphState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     needs_visualization: NotRequired[bool]
 
+class WebResearchState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+    research_context: NotRequired[str]
+    research_error: NotRequired[str]
+    web_next_step: NotRequired[str]
