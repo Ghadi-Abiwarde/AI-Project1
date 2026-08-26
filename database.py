@@ -21,8 +21,11 @@ def execute_query(query: str, parameters=None):
     
     try:
         query = query.strip()
+
         cursor.execute(query, parameters)
+
         columns = [description[0] for description in cursor.description]
+
         rows = cursor.fetchall()
         
         result = [
@@ -36,6 +39,63 @@ def execute_query(query: str, parameters=None):
     finally:
         cursor.close()
         connection.close()
+
+def execute_write(query: str, parameters=None):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    try:
+        query = query.strip()
+
+        cursor.execute(query, parameters)
+
+        affected_rows = cursor.rowcount
+
+        connection.commit()
+
+        return affected_rows
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def validate_write_query(query: str):
+    normalized = query.strip().lower()
+
+    forbidden_keywords = {
+        "drop",
+        "alter",
+        "truncate",
+        "create",
+        "grant",
+        "revoke"
+    }
+
+    if ";" in normalized.rstrip(";"):
+        return "Multiple SQL statements are not allowed."
+
+    if any(keyword in normalized.split() for keyword in forbidden_keywords):
+        return "This SQL operation is not allowed."
+
+    if normalized.startswith("insert"):
+        return None
+
+    if normalized.startswith("update"):
+        if " where " not in normalized:
+            return "UPDATE queries must include a WHERE clause."
+        return None
+
+    if normalized.startswith("delete"):
+        if " where " not in normalized:
+            return "DELETE queries must include a WHERE clause."
+        return None
+
+    return "Only INSERT, UPDATE, and DELETE write queries are allowed."
 
 
 def get_database_schema():

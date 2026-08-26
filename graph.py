@@ -7,7 +7,8 @@ from nodes import(
     conversation_node,
     sql_node,
     visualization_node,
-    rag_node
+    rag_node, 
+    confirm_write_node
 )
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -21,6 +22,15 @@ builder.add_node("sql_node", sql_node)
 builder.add_node("web_research_node", web_team_graph)
 builder.add_node("visualization_node", visualization_node)
 builder.add_node("rag_node", rag_node)
+builder.add_node("confirm_write_node", confirm_write_node)
+
+def route_from_start(state: GraphState):
+    pending_write = state.get("pending_write")
+
+    if pending_write:
+        return "confirm_write_node"
+
+    return "supervisor_node"
 
 def route_to_agent(state:GraphState) -> Literal["conversation_node", "sql_node", "web_research_node","visualization_node","rag_node"]:
     if state["next_agent"] == "conversation":
@@ -36,7 +46,10 @@ def route_to_agent(state:GraphState) -> Literal["conversation_node", "sql_node",
     else:
         return "conversation_node"
 
-builder.add_edge(START, "supervisor_node")
+builder.add_conditional_edges(
+    START,
+    route_from_start
+)
 
 builder.add_conditional_edges(
         "supervisor_node",
@@ -47,6 +60,7 @@ builder.add_edge("conversation_node", END)
 builder.add_edge("web_research_node", END)
 builder.add_edge("rag_node", END)
 builder.add_edge("visualization_node", END)
+builder.add_edge("confirm_write_node", END)
 
 def route_after_sql(state: GraphState): 
     sql_results = state.get("agent_results", {}).get("sql")

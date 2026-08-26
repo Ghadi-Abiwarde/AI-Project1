@@ -9,6 +9,7 @@ class GraphState(TypedDict):
     agent_results: NotRequired[dict]
     messages: Annotated[list[BaseMessage], add_messages]
     needs_visualization: NotRequired[bool]
+    pending_write: NotRequired[dict]
 
 class WebResearchState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]

@@ -6,6 +6,12 @@ from rag.retriever import retrieve_documents
 from web_search import search_web
 from visualization import create_chart, validate_chart_data
 from decimal import Decimal
+from database import (
+    execute_query,
+    execute_write,
+    validate_write_query,
+    get_database_schema
+)
 import json
 import logging
 
@@ -146,7 +152,9 @@ def sql_node(state: GraphState):
     database_schema = get_database_schema()
 
     sql_prompt = f"""Role:
-You are the SQL agent. Convert the user's question into one PostgreSQL SELECT query.
+You are the SQL agent.
+
+Convert the user's request into exactly one PostgreSQL database operation.
 
 Database schema:
 {database_schema}
@@ -157,34 +165,54 @@ orders.customer_id references customers.customer_id.
 order_items.order_id references orders.order_id.
 order_items.product_id references products.product_id.
 
-Rules:
-Generate exactly one PostgreSQL SELECT query.
-Do not generate INSERT, UPDATE, DELETE, DROP, ALTER, or TRUNCATE.
-Use only the provided tables and columns.
-When the question refers to a specific named entity such as a customer, product, or supplier,
-include the identifying field in the query result.
-For aggregate questions about a specific named entity, the query must only return a row if that entity actually exists.
+Allowed operations:
+- SELECT
+- INSERT
+- UPDATE
+- DELETE
 
-Do not use aggregate patterns that return a default zero row when the named entity does not exist.
-For example, when counting orders for a specific customer:
-- filter by the customer in the customers table
-- group by that customer
-- if the customer does not exist, return no rows
+Forbidden operations:
+- DROP
+- ALTER
+- TRUNCATE
+- CREATE
+- GRANT
+- REVOKE
+
+Rules:
+Generate exactly one PostgreSQL statement.
+Use only the provided tables and columns.
+Do not generate multiple SQL statements.
+
+For UPDATE and DELETE:
+- Always include a WHERE clause.
+- The WHERE clause must identify the records the user explicitly requested to modify.
+- Never update or delete every row in a table.
+
+For SELECT:
+- When the question refers to a specific named entity such as a customer,
+  product, or supplier, include the identifying field in the query result.
+- For aggregate questions about a specific named entity, only return a row
+  if that entity actually exists.
+- Do not use aggregate patterns that return a default zero row when the
+  named entity does not exist.
+- Keep numeric values numeric.
+- Do not use TO_CHAR for numeric formatting.
+- Do not add currency symbols.
+- Do not convert numeric values to text.
 
 Return valid JSON using exactly this structure:
-{{"query": "SELECT ..."}}
+{{"operation": "select", "query": "SELECT ..."}}
+
+The value of "operation" must be exactly one of:
+- select
+- insert
+- update
+- delete
+
+The operation value must match the actual SQL statement.
 
 Do not include explanations or Markdown.
-
-When an aggregate, calculation, ranking, or comparison is used to answer the question,
-include the calculated value in the SELECT output with a descriptive alias.
-
-All numeric database values must remain numeric in the SELECT output.
-Do not format numeric values for display inside SQL.
-Do not use TO_CHAR for numeric formatting.
-Do not add currency symbols.
-Do not convert numeric values to text.
-Human-readable formatting will be handled after the query executes.
 """
 
     response = llm.invoke([
@@ -194,22 +222,60 @@ Human-readable formatting will be handled after the query executes.
 
     try:
         decision = json.loads(response.content)
+
+        operation = decision["operation"].strip().lower()
         query = decision["query"].strip()
 
-    except (json.JSONDecodeError, KeyError, AttributeError):
+    except (
+        json.JSONDecodeError,
+        KeyError,
+        AttributeError
+    ):
         return {
             "messages": [
                 AIMessage(
-                    content="I was unable to generate a valid SQL query."
+                    content="I was unable to generate a valid database query."
                 )
             ]
         }
 
-    # If GPT-OSS formats numeric values using TO_CHAR,
-    # regenerate the query once with stricter instructions.
-    if "to_char(" in query.lower():
-        correction_prompt = f"""
-The following PostgreSQL query incorrectly formats numeric values as text:
+    allowed_operations = {
+        "select",
+        "insert",
+        "update",
+        "delete"
+    }
+
+    if operation not in allowed_operations:
+        return {
+            "messages": [
+                AIMessage(
+                    content="The requested database operation is not supported."
+                )
+            ]
+        }
+
+    # Verify that the declared operation matches the generated SQL.
+    actual_operation = query.split(maxsplit=1)[0].lower()
+
+    if actual_operation != operation:
+        return {
+            "messages": [
+                AIMessage(
+                    content="The generated database operation did not pass validation."
+                )
+            ]
+        }
+
+    # -------------------------
+    # SELECT path
+    # -------------------------
+    if operation == "select":
+
+        # Preserve the existing numeric-formatting safeguard.
+        if "to_char(" in query.lower():
+            correction_prompt = f"""
+The following PostgreSQL SELECT query incorrectly formats numeric values as text:
 
 {query}
 
@@ -219,102 +285,284 @@ Regenerate the query while following these rules:
 - Do not add currency symbols.
 - Do not convert numeric values to text.
 - Preserve the meaning of the original query.
-- Return valid JSON using exactly this structure:
-{{"query": "SELECT ..."}}
-- Return no explanations or Markdown.
+
+Return valid JSON using exactly this structure:
+{{"operation": "select", "query": "SELECT ..."}}
+
+Do not include explanations or Markdown.
 """
 
-        retry_response = llm.invoke([
-            SystemMessage(content=correction_prompt)
-        ])
+            retry_response = llm.invoke([
+                SystemMessage(content=correction_prompt)
+            ])
 
-        try:
-            retry_decision = json.loads(retry_response.content)
-            query = retry_decision["query"].strip()
+            try:
+                retry_decision = json.loads(
+                    retry_response.content
+                )
 
-        except (json.JSONDecodeError, KeyError, AttributeError):
+                retry_operation = (
+                    retry_decision["operation"]
+                    .strip()
+                    .lower()
+                )
+
+                query = (
+                    retry_decision["query"]
+                    .strip()
+                )
+
+            except (
+                json.JSONDecodeError,
+                KeyError,
+                AttributeError
+            ):
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                "I was unable to generate "
+                                "a valid database query."
+                            )
+                        )
+                    ]
+                }
+
+            if retry_operation != "select":
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                "The regenerated database query "
+                                "did not pass validation."
+                            )
+                        )
+                    ]
+                }
+
+        if "to_char(" in query.lower():
             return {
                 "messages": [
                     AIMessage(
-                        content="I was unable to generate a valid database query."
+                        content=(
+                            "The generated database query contained "
+                            "unsupported numeric formatting."
+                        )
                     )
                 ]
             }
 
-    # If the retry still contains TO_CHAR, reject it.
-    if "to_char(" in query.lower():
-        return {
-            "messages": [
-                AIMessage(
-                    content="The generated database query contained unsupported numeric formatting."
+        try:
+            results = execute_query(query)
+
+            if not results:
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                "No matching information was found "
+                                "in the database."
+                            )
+                        )
+                    ],
+                    "agent_results": {
+                        "sql": []
+                    }
+                }
+
+            natural_language_prompt = (
+                "Role: You translate database results into natural language. "
+                "Answer the user's question using only the provided database results. "
+                "Do not fabricate data. "
+                "If the results do not contain enough information, say so clearly. "
+                "When presenting monetary values, format them clearly as currency "
+                "using a dollar sign and appropriate thousands separators when applicable. "
+                "Do not include Markdown."
+            )
+
+            final_response = llm.invoke([
+                SystemMessage(
+                    content=natural_language_prompt
+                ),
+                HumanMessage(
+                    content=(
+                        f"User question: {latest_message.content}\n"
+                        f"Database results: {results}"
+                    )
                 )
-            ]
-        }
+            ])
 
-    # Safety check: SELECT queries only.
-    if not query.lower().startswith("select"):
-        return {
-            "messages": [
-                AIMessage(
-                    content="Only SELECT queries are allowed."
-                )
-            ]
-        }
+        except Exception as error:
+            print("SQL execution error:", error)
 
-    try:
-        results = execute_query(query)
-
-        if not results:
             return {
                 "messages": [
                     AIMessage(
-                        content="No matching information was found in the database."
+                        content=(
+                            "I could not safely execute that "
+                            f"database query: {error}"
+                        )
                     )
-                ],
-                "agent_results": {
-                    "sql": []
-                }
+                ]
             }
 
-        natural_language_prompt = (
-            "Role: You translate database results into natural language. "
-            "Answer the user's question using only the provided database results. "
-            "Do not fabricate data. "
-            "If the results do not contain enough information, say so clearly. "
-            "When presenting monetary values, format them clearly as currency "
-            "using a dollar sign and appropriate thousands separators when applicable. "
-            "Do not include Markdown."
-        )
+        return {
+            "messages": [
+                final_response
+            ],
+            "agent_results": {
+                "sql": results
+            }
+        }
 
-        final_response = llm.invoke([
-            SystemMessage(content=natural_language_prompt),
-            HumanMessage(
-                content=(
-                    f"User question: {latest_message.content}\n"
-                    f"Database results: {results}"
+    # -------------------------
+    # WRITE path
+    # -------------------------
+    validation_error = validate_write_query(query)
+    
+    if validation_error:
+        return {
+            "messages": [
+                AIMessage(
+                    content=validation_error
                 )
-            )
-        ])
+            ]
+        }
+
+#UPDATE nad DELETE require confirmation
+    if operation in {"update", "delete"}:
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"This operation will {operation} database records. "
+                        "Please confirm by replying yes or no"
+                    )
+                )
+            ],
+            "pending_write": {
+                "operation": operation,
+                "query": query
+            }
+        }
+    
+
+    try:
+        affected_rows = execute_write(query)
 
     except Exception as error:
-        print("SQL execution error:", error)
+        print("SQL write error:", error)
 
         return {
             "messages": [
                 AIMessage(
-                    content=f"I could not safely execute that database query: {error}"
+                    content=(
+                        "I could not safely execute that "
+                        f"database write operation: {error}"
+                    )
                 )
             ]
+        }
+
+    if operation == "insert":
+        message = (
+            f"Insert completed successfully. "
+            f"{affected_rows} row(s) affected."
+        )
+
+    elif operation == "update":
+        message = (
+            f"Update completed successfully. "
+            f"{affected_rows} row(s) affected."
+        )
+
+    else:
+        message = (
+            f"Delete completed successfully. "
+            f"{affected_rows} row(s) affected."
+        )
+
+    return {
+        "messages": [
+            AIMessage(content=message)
+        ]
+    }
+
+
+
+
+
+
+def confirm_write_node(state: GraphState):
+    latest_message = state["messages"][-1].content.strip().lower()
+    pending_write = state.get("pending_write")
+
+    if not pending_write:
+        return{
+            "messages": [
+                AIMessage(content="There is no pending database option to confirm.")
+            ]
+        }
+    if latest_message in {"yes", "confirm", "yes confirm"}:
+        try:
+            affected_rows = execute_write(
+                pending_write["query"]
+            )
+
+            if affected_rows == 0:
+                return {
+                    "messages": [
+                        AIMessage(
+                            content='No matching records were found, so no changes were made.'
+                        )
+                    ],
+                    "pending_write": {}
+                }
+
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            f"{pending_write['operation'].capitalize()}"
+                            f"completed successfully. "
+                            f"{affected_rows} row(s) affected."
+                        )
+                    )
+                ],
+                "pending_write": {}
+            }
+
+        except Exception as error:
+            return {
+                "messages": [
+                    AIMessage(
+                        content=f"The database operation failed: {error}"
+                    )
+                ],
+                "pending_write": {}
+            }
+
+    if latest_message in {"no", "cancel", "no cancel"}:
+        return {
+            "messages": [
+                AIMessage(
+                    content="The database operation was cancelled."
+                )
+            ],
+            "pending_write": {}
         }
 
     return {
         "messages": [
-            final_response
-        ],
-        "agent_results": {
-            "sql": results
-        }
+            AIMessage(
+                content="Please reply yes to confirm or no to cancel"
+            )
+        ]
     }
+
+
+
+
 
 
 
@@ -370,9 +618,7 @@ Rules:
             seen_links.add(link)
             unique_results.append(result)
 
-    print("GENERATED QUERIES:", queries)
-    print("TOTAL RESULTS:", len(all_results))
-    print("UNIQUE RESULTS:", len(unique_results))
+   
 
     # Step 4: Build the raw research context
     context = ""
@@ -462,11 +708,7 @@ Search results:
          "research_error": "No sufficiently relevant web search was found for that request."
       }
 
-    # Temporary debugging
-    print("\n========== SELECTED RESEARCH ==========")
-    print(selected_context)
-    print("=======================================\n")
-
+ 
     # Step 6: Pass selected evidence to the supervisor
     return {
         "research_context": selected_context,
