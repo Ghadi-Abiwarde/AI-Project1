@@ -10,10 +10,12 @@ from database import (
     execute_query,
     execute_write,
     validate_write_query,
-    get_database_schema
+    get_database_schema,
+    count_matching_rows
 )
 import json
 import logging
+import psycopg2
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +172,7 @@ Allowed operations:
 - INSERT
 - UPDATE
 - DELETE
+-CLARIFICATION
 
 Forbidden operations:
 - DROP
@@ -201,14 +204,69 @@ For SELECT:
 - Do not add currency symbols.
 - Do not convert numeric values to text.
 
+Write Safety Rules:
+
+For UPDATE and DELETE operations, the user's request must clearly identify
+the record or records they intend to modify.
+
+If the request does not contain enough information to safely determine
+which record or records should be changed, do not guess.
+
+Examples of ambiguous requests:
+- "Delete the customer."
+- "Change the customer's email."
+- "Update the price to 20."
+- "Delete Alice." when the request does not uniquely identify which Alice is intended.
+
+For an ambiguous write request, do not generate SQL.
+
+Instead return:
+{{"operation": "clarification", "query": ""}}
+
+Write Scope:
+
+For INSERT and SELECT operations:
+- write_scope must be "single".
+
+For UPDATE and DELETE operations:
+- write_scope must be "single" when the user intends to modify one specific record.
+- write_scope must be "bulk" only when the user explicitly requests modifying multiple records or a clearly defined group of records.
+
+Examples:
+
+"Delete the customer named John Smith."
+→ write_scope: "single"
+
+"Update product Laptop Pro 14's price to 1200."
+→ write_scope: "single"
+
+"Delete all customers who joined before 2024."
+→ write_scope: "bulk"
+
+"Set every product in the Electronics category to 10% higher."
+→ write_scope: "bulk"
+
+"Delete all orders belonging to customer John Smith."
+→ write_scope: "bulk"
+
+Never infer bulk intent merely because a generated WHERE clause may match multiple records.
+
+If a request appears to target one record but its identifier may not be unique,
+use "single". Database validation will determine whether the identifier actually
+matches multiple records.
+
+
+Do not invent identifying information that the user did not provide.
+
 Return valid JSON using exactly this structure:
-{{"operation": "select", "query": "SELECT ..."}}
+{{"operation": "select", "write_scope": "single", "query": "SELECT ..."}}
 
 The value of "operation" must be exactly one of:
 - select
 - insert
 - update
 - delete
+-clarification
 
 The operation value must match the actual SQL statement.
 
@@ -220,11 +278,14 @@ Do not include explanations or Markdown.
         latest_message
     ])
 
+    
+
     try:
         decision = json.loads(response.content)
 
         operation = decision["operation"].strip().lower()
         query = decision["query"].strip()
+       
 
     except (
         json.JSONDecodeError,
@@ -239,11 +300,15 @@ Do not include explanations or Markdown.
             ]
         }
 
+   
+
+        
     allowed_operations = {
         "select",
         "insert",
         "update",
-        "delete"
+        "delete",
+        "clarification"
     }
 
     if operation not in allowed_operations:
@@ -254,6 +319,46 @@ Do not include explanations or Markdown.
                 )
             ]
         }
+
+    if operation == "clarification":
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            "I need more information before I can safely modify "
+                            "the database. Please specify which record you want "
+                            "to change."
+                        )
+                    )
+                ]
+            }
+
+    try:
+        write_scope = decision["write_scope"].strip().lower()
+
+    except (KeyError, AttributeError):
+        return {
+            "messages": [
+                AIMessage(
+                    content="I was unable to determine a safe scope for the database operation."
+                )
+            ]
+        }
+
+    allowed_scopes = {
+            "single",
+            "bulk"
+            }
+        
+    if write_scope not in allowed_scopes:
+        return {
+            "messages": [
+                 AIMessage(
+                    content="I was unable to determine a safe scope for the database operation."
+                )
+            ]
+        }    
+                
 
     # Verify that the declared operation matches the generated SQL.
     actual_operation = query.split(maxsplit=1)[0].lower()
@@ -270,6 +375,108 @@ Do not include explanations or Markdown.
     # -------------------------
     # SELECT path
     # -------------------------
+    
+    if operation in {"update", "delete"}:
+
+        query_without_semicolon = query.rstrip(";")
+
+        if operation == "update":
+            table = query_without_semicolon.split()[1]
+
+        else:
+            table = query_without_semicolon.split()[2]
+
+        where_parts = query_without_semicolon.lower().split(" where ", 1)
+
+        if len(where_parts) != 2:
+            return {
+                "messages": [
+                    AIMessage(
+                        content="I cannot safely perform this operation because it does not identify specific records."
+                    )
+                ]
+            }    
+
+        where_clause = query_without_semicolon[len(where_parts[0]) + len(" where "):]
+
+        matching_rows = count_matching_rows(
+            table,
+            where_clause
+        )
+
+        if matching_rows == 0:
+            return {
+                "messages": [
+                    AIMessage(
+                        content="No matching record was found in the database."
+                    )
+                ]
+            }
+
+        if matching_rows > 1:
+
+            if write_scope == "single":
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                f"This request matches {matching_rows} database records. "
+                                "Please provide more specific information so I can identify "
+                                "The exact record you want to modify."
+                            )
+                        )
+                    ]
+                }
+
+            if write_scope == "bulk":
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                f"This operation will {operation} "
+                                f"{matching_rows} database records. "
+                                "Please confirm by replying yes or no."
+                            )
+                        )
+                    ],
+                    "pending_write": {
+                        "operation": operation,
+                        "query": query,
+                        "write_scope": "bulk",
+                        "matching_rows": matching_rows
+                    }
+                }
+
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            f"This request matches {matching_rows} database records. "
+                            "Please provide more specific information so I can identify "
+                            "the exact record you want to modify."
+                        )
+                    )
+                ]
+            }
+
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"This operation will {operation} 1 database record. "
+                        "Please confirm by replying yes or no."
+                    )
+                )
+            ],
+            "pending_write": {
+                "operation": operation,
+                "query": query,
+                "write_scope": "single",
+                "matching_rows": 1
+            }
+        }
+    
+    
     if operation == "select":
 
         # Preserve the existing numeric-formatting safeguard.
@@ -392,17 +599,28 @@ Do not include explanations or Markdown.
                 )
             ])
 
+        except psycopg2.IntegrityError as error:
+            print("Database integrity error:", error)
+
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            "The database operation could not be completed because "
+                            "the provide data conflicts with a database constraint."
+                        )
+                    )
+                ]
+            }
+
         except Exception as error:
             print("SQL execution error:", error)
 
             return {
                 "messages": [
                     AIMessage(
-                        content=(
-                            "I could not safely execute that "
-                            f"database query: {error}"
-                        )
-                    )
+                        content="The database operation could not be completed."
+                                            )
                 ]
             }
 
@@ -414,6 +632,9 @@ Do not include explanations or Markdown.
                 "sql": results
             }
         }
+
+    
+
 
     # -------------------------
     # WRITE path
@@ -450,6 +671,20 @@ Do not include explanations or Markdown.
     try:
         affected_rows = execute_write(query)
 
+    except psycopg2.IntegrityError as error:
+        print("Database integrity error:", error)
+
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        "The database operation could not be completed because "
+                        "the provided data conflicts with a database constraint."
+                    )
+                )
+            ]
+        }
+
     except Exception as error:
         print("SQL write error:", error)
 
@@ -457,8 +692,7 @@ Do not include explanations or Markdown.
             "messages": [
                 AIMessage(
                     content=(
-                        "I could not safely execute that "
-                        f"database write operation: {error}"
+                        "The database operation could not be completed."
                     )
                 )
             ]
@@ -523,7 +757,7 @@ def confirm_write_node(state: GraphState):
                 "messages": [
                     AIMessage(
                         content=(
-                            f"{pending_write['operation'].capitalize()}"
+                            f"{pending_write['operation'].capitalize()} "
                             f"completed successfully. "
                             f"{affected_rows} row(s) affected."
                         )
@@ -532,11 +766,28 @@ def confirm_write_node(state: GraphState):
                 "pending_write": {}
             }
 
-        except Exception as error:
+        except psycopg2.IntegrityError as error:
+            print("Database integrity error:", error)
+
             return {
                 "messages": [
                     AIMessage(
-                        content=f"The database operation failed: {error}"
+                        content=(
+                            "The database operation could not be completed because "
+                            "the provided data conflicts with a database constraint."
+                        )
+                    )
+                ],
+                "pending_write": {}
+            }
+
+        except Exception as error:
+            print("SQL write confirmation_error:", error)
+
+            return {
+                "messages": [
+                    AIMessage(
+                        content="The database operation could not be completed."
                     )
                 ],
                 "pending_write": {}

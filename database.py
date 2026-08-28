@@ -98,6 +98,22 @@ def validate_write_query(query: str):
     return "Only INSERT, UPDATE, and DELETE write queries are allowed."
 
 
+def count_matching_rows(table: str, where_clause: str):
+    connection = get_connection()
+    connection.set_session(readonly=True)
+    cursor = connection.cursor()
+
+    try:
+        query = f"SELECT COUNT(*) FROM {table} WHERE {where_clause}"
+        cursor.execute(query)
+
+        return cursor.fetchone()[0]
+
+    finally:
+        cursor.close()
+        connection.close()
+
+
 def get_database_schema():
     rows = execute_query("""
     SELECT
