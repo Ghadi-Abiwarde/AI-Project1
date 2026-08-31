@@ -121,6 +121,7 @@ Return only the JSON object.
     route = "conversation"
     needs_visualization = False
 
+
  if not isinstance(needs_visualization, bool):
     needs_visualization = False      
 
