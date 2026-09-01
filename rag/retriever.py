@@ -17,10 +17,17 @@ def retrieve_documents(query: str):
         k=3
     )
 
+    print(f"\nQUERY: {query}")
+
+    for document, score in results:
+        print("SCORE:",score)
+        print("CONTENT:", document.page_content)
+        print("-" * 50)
+
     relevant_documents = [
         document
         for document, score in results
-        if score < 1.0
+        if score < 1.1
     ]   
     
     return relevant_documents
