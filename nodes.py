@@ -13,6 +13,7 @@ from database import (
     get_database_schema,
     count_matching_rows
 )
+from datetime import date, datetime
 import json
 import logging
 import psycopg2
@@ -1178,14 +1179,21 @@ def visualization_node(state: GraphState):
          }
       label_column = None
       value_column = None
+      id_label_column = None
       
       for column, value in first_row.items():
 
-         if isinstance(value, str) and label_column is None:
+         if isinstance(value,(str, date, datetime)) and label_column is None:
             label_column = column
 
-         elif isinstance(value, (int, float, Decimal)) and not column.lower().endswith("_id") and value_column is None:
+         elif column.lower().endswith("_id") and id_label_column is None:
+             id_label_column = column   
+
+         elif (isinstance(value, (int, float, Decimal)) and not column.lower().endswith("_id") and value_column is None):
             value_column = column
+
+      if label_column is None:
+          label_column = id_label_column      
 
       if label_column is None or value_column is None:
             return {
@@ -1196,7 +1204,9 @@ def visualization_node(state: GraphState):
                ]
     }  
       labels = [
-            row[label_column]
+            row[label_column].isoformat()
+            if isinstance(row[label_column], (date, datetime))
+            else str(row[label_column])
             for row in sql_results
          ]
 

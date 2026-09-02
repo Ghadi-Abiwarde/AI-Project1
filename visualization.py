@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 from decimal import Decimal
 
+
 def create_chart(chart_type, labels, values):
     fig, ax = plt.subplots(figsize=(8, 5))
 
