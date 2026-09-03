@@ -821,10 +821,12 @@ def confirm_write_node(state: GraphState):
 
 def researcher_node(state: WebResearchState):
     latest_message = state["messages"][-1]
-
+    current_date = date.today().isoformat()
     # Step 1: Generate targeted search queries
-    query_prompt = """Role:
+    query_prompt = f"""Role:
 You are a web research agent.
+
+Current date: {current_date}
 
 Your task is to generate targeted search queries that will help answer the user's question.
 
@@ -834,8 +836,13 @@ Rules:
 - Prefer precise technical terms when appropriate.
 - Do not answer the user's question.
 - Return valid JSON using exactly this structure:
-{"queries": ["query 1", "query 2", "query 3"]}
+{{"queries": ["query 1", "query 2", "query 3"]}}
 - Do not include explanations or Markdown.
+- When the user asks for current, latest, recent, newest, or up-to-date
+  information, do not insert a specific model, version, release, date, or
+  year into the search query unless the user explicitly provided it.
+- Preserve freshness terms such as "latest", "current", "newest", or
+  "recent" in the generated search queries.
 """
 
     query_response = llm.invoke([
@@ -850,6 +857,8 @@ Rules:
         if not isinstance(queries, list) or not queries:
             queries = [latest_message.content]
 
+
+        
     except (json.JSONDecodeError, KeyError, TypeError):
         queries = [latest_message.content]
 
@@ -928,7 +937,10 @@ CRITICAL RULES:
 - Do not combine multiple snippets into a new claim.
 - Do not answer the user's question.
 - Do not write conclusions or explanations.
-- Do not add facts from prior knowledge.
+- When the user asks for current, latest, recent, newest, or up-to-date
+  information, prioritize recent and authoritative evidence.
+- Do not assume that older evidence describes the current state when newer
+  relevant evidence is available.
 
 Return only selected results using this format:
 
