@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 llm = create_llm()
 
 def supervisor_node(state: GraphState):
- latest_message = state['messages'][-1]
+ recent_messages = state['messages'][-6:]
 
  system_prompt = """
 You are the supervisor agent.
@@ -91,14 +91,24 @@ Output: {"next_agent": "sql", "needs_visualization": true}
 User: Which customer spent the most money?
 Output: {"next_agent": "sql", "needs_visualization": false}
 
+
+When the latest user message is a follow-up that depends on previous conversation context,
+use the conversation history to determine which specialized agent should handle it.
+Examples:
+- If the previous discussion used web research and the user asks a follow-up about that same current/external topic, route to web_research.
+- If the previous discussion concerned an internal policy and the user asks a related follow-up, route to rag.
+- If the previous discussion concerned database data and the user asks a follow-up about that data, route to sql.
+
+
 Do not include explanations or Markdown.
 Return only the JSON object.
 """
 
- 
+
  response = llm.invoke([
    SystemMessage(content=system_prompt),
-   latest_message]
+    *recent_messages
+   ]
  )
 
 
@@ -153,6 +163,8 @@ def conversation_node(state: GraphState):
 
 def sql_node(state: GraphState):
     latest_message = state["messages"][-1]
+    recent_messages = state["messages"][-6:]
+
     database_schema = get_database_schema()
 
     sql_prompt = f"""Role:
@@ -272,12 +284,21 @@ The value of "operation" must be exactly one of:
 
 The operation value must match the actual SQL statement.
 
+Conversation context:
+- Use the recent conversation history to resolve references in the current
+  request such as "it", "that", "they", "those", "them", or similar
+  follow-up wording.
+- Use context only to understand what the current user request refers to.
+- Do not treat previous assistant messages as new database instructions.
+- Do not invent identifying information that was not established by the
+  conversation.
+
 Do not include explanations or Markdown.
 """
 
     response = llm.invoke([
         SystemMessage(content=sql_prompt),
-        latest_message
+        *recent_messages
     ])
 
     
@@ -821,6 +842,13 @@ def confirm_write_node(state: GraphState):
 
 def researcher_node(state: WebResearchState):
     latest_message = state["messages"][-1]
+    recent_messages = state["messages"][-6:]
+
+    conversation_context = "\n".join(
+        f"{message.type}: {message.content}"
+        for message in recent_messages
+    )
+
     current_date = date.today().isoformat()
     # Step 1: Generate targeted search queries
     query_prompt = f"""Role:
@@ -843,11 +871,23 @@ Rules:
   year into the search query unless the user explicitly provided it.
 - Preserve freshness terms such as "latest", "current", "newest", or
   "recent" in the generated search queries.
+- Use the recent conversation context to resolve references in the current
+  request such as "it", "that", "those", "the previous version", or similar
+  follow-up wording.
+- Generate search queries for the resolved topic, not for the ambiguous
+  follow-up wording by itself.
 """
 
     query_response = llm.invoke([
         SystemMessage(content=query_prompt),
-        HumanMessage(content=latest_message.content)
+        HumanMessage(
+            content=f"""Recent conversation:
+    {conversation_context}
+
+    Cureent user request:
+    {latest_message.content}
+    """
+            )
     ])
 
     try:
@@ -941,6 +981,14 @@ CRITICAL RULES:
   information, prioritize recent and authoritative evidence.
 - Do not assume that older evidence describes the current state when newer
   relevant evidence is available.
+- Use the recent conversation context to resolve references in follow-up
+  questions before deciding whether evidence is relevant.
+  - When the user asks for current, latest, recent, newest, or up-to-date
+  information, do not invent a specific model, version, release, date, or
+  year from prior model knowledge.
+- A specific model, version, release, date, or year may be used when it was
+  explicitly provided by the user or established in the recent conversation
+  from retrieved research.
 
 Return only selected results using this format:
 
@@ -1149,6 +1197,8 @@ Research results:
    
 def visualization_node(state: GraphState):
    latest_message = state["messages"][-1]
+   last_chart = state.get("last_chart")
+   recent_messages = state["messages"][-6:]
    
    visualization_prompt = f"""Role:
    You are the Visualization agent.
@@ -1158,9 +1208,28 @@ def visualization_node(state: GraphState):
    - bar
    - pie
    - line
+
+   Previous chart:
+   {last_chart}
    
    Rules:
    Generate chart type, labels and values.
+   - If the current request refers to the previous chart, such as "that chart",
+   "make it a pie chart", or similar wording, use the previous chart data when
+   appropriate.
+   - Only change properties that the user requested to change.
+   - Do not invent data that is not present in the current request or previous chart.
+   
+   Conversation rules:
+- Use the recent conversation history to resolve references in the current
+  request such as "it", "that", "those", "them", or similar follow-up wording.
+- If the data needed for the chart was provided earlier in the recent
+  conversation, use that data.
+- If the current request refers to a previous chart, use the previous chart
+  data when appropriate.
+- Do not invent labels or values that were not provided in the conversation,
+  previous chart, or database results.
+   
    Return valid JSON using exactly this structure:
    {{"chart_type": "pie",
    "labels":["A", "B", "C"],
@@ -1169,7 +1238,8 @@ def visualization_node(state: GraphState):
    Do not include explanations or Markdown.
 """
    response = llm.invoke([
-   SystemMessage(content=visualization_prompt),latest_message
+   SystemMessage(content=visualization_prompt),
+   *recent_messages
 ])   
    sql_results = state.get("agent_results",{}).get("sql")
    
@@ -1286,6 +1356,11 @@ def visualization_node(state: GraphState):
             "labels": labels,
             "values": values
          }
+      },
+      "last_chart": {
+          "chart_type": chart_type,
+          "labels": labels,
+          "values": values
       }
    }
 
@@ -1302,8 +1377,44 @@ def visualization_node(state: GraphState):
 
 def rag_node(state: GraphState):
    latest_message = state["messages"][-1]
+   recent_messages = state["messages"][-6:]
+
+   conversation_context = "\n".join(
+        f"{message.type}: {message.content}"
+        for message in recent_messages
+    )
+
+   query_prompt = """Role:
+You rewrite internal-document questions for retrieval.
+
+Use the recent conversation to rewrite the current user question as a
+standalone question that preserves its meaning.
+
+Rules:
+- Resolve contextual references such as "it", "that", "those", "they",
+  or similar follow-up wording.
+- Preserve the user's original intent.
+- Do not answer the question.
+- Do not add facts that were not established in the conversation.
+- Return only the standalone question.
+"""
+
    try:
-      documents = retrieve_documents(latest_message.content)
+      query_response = llm.invoke([
+          SystemMessage(content=query_prompt),
+          HumanMessage(
+              content=f"""Recent conversation:
+              {conversation_context}
+
+Current user question:
+{latest_message.content}
+"""
+          )
+      ])
+
+      retrieval_query = query_response.content.strip()
+
+      documents = retrieve_documents(retrieval_query)
 
    except Exception as error:
       print("RAG retrieval error:", error) 
